@@ -19,16 +19,43 @@ export function ConnectStep({ wallet }: { wallet: WalletState }) {
         <Pipeline activeIndex={1} doneIds={wallet.address ? ['dapp', 'wallet'] : []} />
 
         {!wallet.address ? (
-          <div className="btn-row">
-            <button
-              className="btn"
-              onClick={() => void wallet.connect()}
-              disabled={wallet.isConnecting}
-            >
-              {wallet.isConnecting && <span className="spinner" />}
-              Conectar MetaMask
-            </button>
-          </div>
+          <>
+            <div className="btn-row">
+              <button
+                className="btn"
+                onClick={() => void wallet.connect()}
+                disabled={wallet.isConnecting}
+              >
+                {wallet.isConnecting && <span className="spinner" />}
+                Conectar MetaMask
+              </button>
+              {!wallet.providerReady && (
+                <span className="muted small">
+                  <span className="spinner" />
+                  Esperando a MetaMask…
+                </span>
+              )}
+            </div>
+
+            {!wallet.providerReady && (
+              <div className="notice warn">
+                <strong>Todavía no veo tu wallet</strong>
+                {wallet.diagnostics?.hint ??
+                  'Buscando la extensión en esta ventana…'}
+                <div className="small muted" style={{ marginTop: 8 }}>
+                  ¿Estás seguro de estar en el mismo navegador y perfil donde
+                  instalaste MetaMask? (Firefox y Chrome son perfiles separados.)
+                </div>
+              </div>
+            )}
+
+            {wallet.providerReady && !wallet.diagnostics?.isMetaMask && (
+              <div className="notice warn">
+                <strong>Encontré una wallet, pero no es MetaMask</strong>
+                {wallet.diagnostics?.hint}
+              </div>
+            )}
+          </>
         ) : (
           <>
             <div className="notice ok">

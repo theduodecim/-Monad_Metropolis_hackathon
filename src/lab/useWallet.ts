@@ -20,6 +20,8 @@ export type WalletState = {
   balance: bigint | null
   isConnecting: boolean
   error: string | null
+  providerReady: boolean
+  diagnostics: WalletDiagnostics | null
   connect: () => Promise<void>
   disconnect: () => void
   refreshBalance: () => Promise<void>
@@ -29,13 +31,84 @@ export type WalletState = {
 
 type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
-  on?: (event: string, cb: () => void) => void
-  removeListener?: (event: string, cb: () => void) => void
+  on?: (event: string, cb: (arg?: unknown) => void) => void
+  removeListener?: (event: string, cb: (arg?: unknown) => void) => void
+  isMetaMask?: boolean
+  _isMetaMask?: boolean
+}
+
+type MaybeProvider = Eip1193Provider & {
+  providers?: Eip1193Provider[]
+}
+
+/**
+ * Why this is not just `window.eth`:
+ * when a user has more than one wallet extension installed, the page receives an
+ * ARRAY of providers and `window.eth.request` stops existing. Reading it naively
+ * reports "no wallet" while MetaMask is sitting right there.
+ */
+function readProvider(): MaybeProvider | null {
+  const w = window as unknown as {
+    eth?: MaybeProvider | Eip1193Provider[]
+    ethereum?: MaybeProvider | Eip1193Provider[]
+  }
+  const raw = w.eth ?? w.ethereum
+  if (!raw) return null
+  if (Array.isArray(raw)) {
+    return (
+      (raw.find((p) => p.isMetaMask || p._isMetaMask) as MaybeProvider | undefined) ??
+      (raw[0] as MaybeProvider)
+    )
+  }
+  return raw as MaybeProvider
 }
 
 function getInjected(): Eip1193Provider | null {
-  const eth = (window as unknown as { eth?: Eip1193Provider }).eth
-  return eth ?? null
+  return readProvider()
+}
+
+/** Diagnostics so the user is never stuck on a dead-end message. */
+export type WalletDiagnostics = {
+  hasWindowEth: boolean
+  providerCount: number
+  isMetaMask: boolean
+  isLockedOrUnavailable: boolean | null
+  hint: string
+}
+
+export function diagnoseWallet(): WalletDiagnostics {
+  const w = window as unknown as {
+    eth?: unknown
+    ethereum?: unknown
+  }
+  const raw = w.eth ?? w.ethereum
+  const provider = readProvider()
+  const count = Array.isArray(raw)
+    ? raw.length
+    : raw
+      ? 1
+      : 0
+  const isMetaMask = Boolean(provider?.isMetaMask || provider?._isMetaMask)
+
+  let hint = ''
+  let locked: boolean | null = null
+  if (!raw) {
+    hint =
+      'No se encontró ningún provider inyectado. Si tenés MetaMask, probá recargá con Ctrl+Shift+R (fuerza un refresh, evita la caché). Si sigue igual, verificá que la extensión esté habilitada en este navegador y en este perfil.'
+  } else if (!isMetaMask) {
+    hint = `Se detectaron ${count} wallet(s), pero ninguna es MetaMask. El laboratorio usa MetaMask: instalá o habilitá la extensión de MetaMask.`
+  } else {
+    hint =
+      'MetaMask está inyectada en la página. Si el botón no funciona, desbloqueá la extensión y recargá.'
+  }
+
+  return {
+    hasWindowEth: Boolean(raw),
+    providerCount: count,
+    isMetaMask,
+    isLockedOrUnavailable: locked,
+    hint,
+  }
 }
 
 /** MetaMask rejects with 4001 when the user clicks "Reject". */
@@ -86,7 +159,7 @@ export function useWallet(): WalletState {
   const connect = useCallback(async () => {
     const injected = getInjected()
     if (!injected) {
-      setError('No se detectó MetaMask. Instalá la extensión y recargá la página.')
+      setError(diagnoseWallet().hint)
       return
     }
     setIsConnecting(true)
@@ -171,8 +244,30 @@ export function useWallet(): WalletState {
     }
   }, [connect, syncChain])
 
+  // MetaMask injects asynchronously. Poll briefly instead of giving up on the
+  // first miss, otherwise a slow injection looks identical to "not installed".
+  const [providerReady, setProviderReady] = useState(() => getInjected() !== null)
+
   useEffect(() => {
-    if (!injectedSnapshot()) return
+    if (getInjected() !== null) {
+      setProviderReady(true)
+      return
+    }
+    let attempts = 0
+    const timer = window.setInterval(() => {
+      attempts += 1
+      if (getInjected() !== null) {
+        setProviderReady(true)
+        window.clearInterval(timer)
+      } else if (attempts > 20) {
+        window.clearInterval(timer)
+      }
+    }, 150)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    if (!providerReady) return
     void (async () => {
       await syncChain()
       const accounts = await getAccountsSilently()
@@ -182,7 +277,7 @@ export function useWallet(): WalletState {
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [providerReady])
 
   return {
     address,
@@ -190,16 +285,14 @@ export function useWallet(): WalletState {
     balance,
     isConnecting,
     error,
+    providerReady,
+    diagnostics: providerReady ? diagnoseWallet() : null,
     connect,
     disconnect,
     refreshBalance,
     switchToTestnet,
     getSigner,
   }
-}
-
-function injectedSnapshot(): boolean {
-  return getInjected() !== null
 }
 
 /** eth_accounts does not prompt the user, unlike eth_requestAccounts. */
